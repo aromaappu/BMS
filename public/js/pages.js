@@ -292,8 +292,10 @@ function updateQty(pid, qty) {
 }
 
 function renderCart() {
+  const selectedMode = document.getElementById('billMode')?.value || 'cash';
+  const selectedDue = document.getElementById('billDueDate')?.value || '';
   const subtotal = cart.reduce((s, i) => s + i.price * i.qty, 0);
-  const discount = parseFloat(document.getElementById('billDiscount')?.value || 0);
+  const discount = Math.min(subtotal, Math.max(0, parseFloat(document.getElementById('billDiscount')?.value || 0) || 0));
   const taxRate = window._settings.gst_enabled === '1' ? parseFloat(window._settings.default_gst || 0) : 0;
   const tax = (subtotal - discount) * taxRate / 100;
   const total = subtotal - discount + tax;
@@ -312,16 +314,16 @@ function renderCart() {
     `).join('');
   
   document.getElementById('cartSummary').innerHTML = `
-    <div class="form-group"><label>Discount</label><input type="number" step="0.01" id="billDiscount" value="${discount}" oninput="renderCart()"></div>
+    <div class="form-group"><label>Discount</label><input type="number" step="0.01" id="billDiscount" value="${discount}" onchange="renderCart()"></div>
     ${taxRate > 0 ? `<p style="margin-bottom:10px">Tax (${taxRate}%): ${money(tax)}</p>` : ''}
     <div class="form-group"><label>Payment Mode</label>
       <select id="billMode" onchange="document.getElementById('dueDateWrap').style.display=this.value==='credit'?'block':'none'">
-        <option value="cash">💵 Cash</option>
-        <option value="upi">📱 UPI</option>
-        <option value="credit">💳 Credit</option>
+        <option value="cash" ${selectedMode === 'cash' ? 'selected' : ''}>💵 Cash</option>
+        <option value="upi" ${selectedMode === 'upi' ? 'selected' : ''}>📱 UPI</option>
+        <option value="credit" ${selectedMode === 'credit' ? 'selected' : ''}>💳 Credit</option>
       </select>
     </div>
-    <div class="form-group" id="dueDateWrap" style="display:none"><label>Due Date</label><input type="date" id="billDueDate"></div>
+    <div class="form-group" id="dueDateWrap" style="display:${selectedMode === 'credit' ? 'block' : 'none'}"><label>Due Date</label><input type="date" id="billDueDate" value="${selectedDue}"></div>
     <div class="cart-total">
       <div class="total-row"><span>Subtotal:</span><span>${money(subtotal)}</span></div>
       ${discount > 0 ? `<div class="total-row"><span>Discount:</span><span>-${money(discount)}</span></div>` : ''}
@@ -338,11 +340,12 @@ function renderCart() {
 async function submitBill() {
   if (cart.length === 0) return toast('Cart is empty', 'error');
   const mode = document.getElementById('billMode').value;
+  if (mode === 'credit' && !document.getElementById('billCustomer').value) return toast('Select a customer for credit billing', 'warning');
   const data = {
     customer_id: document.getElementById('billCustomer').value,
     items: cart,
     discount: parseFloat(document.getElementById('billDiscount').value || 0),
-    tax: 0,
+    tax: 0, // Tax is calculated securely from business settings on the server.
     payment_mode: mode,
     due_date: mode === 'credit' ? document.getElementById('billDueDate').value : null
   };
