@@ -29,6 +29,8 @@ vanilla-JS single-page UI — and installs itself with a one-click setup wizard.
 - 🧾 **PDF invoices** — server-side receipt generation, printable from the browser
 - 💳 **Credit ledger** — track customer dues and settlements per customer
 - 📡 **Clean JSON API** — every feature is an endpoint under `/api`, consumed by the SPA frontend
+- 📈 **Responsive Chart.js insights** — sales/profit trends, breakdowns and top-selling products
+- 📱 **Mobile-ready UI** — adaptive dashboard cards, accessible controls and horizontally scrollable data tables
 
 ---
 
@@ -36,12 +38,12 @@ vanilla-JS single-page UI — and installs itself with a one-click setup wizard.
 
 | Module | What it does |
 |---|---|
-| 🖥️ **Dashboard** | Daily sales summary and quick stats |
+| 🖥️ **Dashboard** | Daily KPIs, recent monthly sales/profit charts and inventory summaries |
 | 🛒 **Billing** | Multi-product cart billing with automatic totals |
 | 👤 **Customers** | Customer records with phone & address lookup |
 | 💳 **Credits** | Outstanding dues ledger, mark-as-paid settlement |
 | 🏷️ **Products** | Product catalog with price management |
-| 📊 **Reports** | Sales reports by date range |
+| 📊 **Reports** | Accurate sales reports by date range, category, customer and payment type with CSV exports |
 | 🧾 **Invoices** | PDF bill generation (`pdf.php`) |
 | 🔔 **Notifications** | Low-stock / due reminders |
 | ⚙️ **Settings** | Shop profile & system configuration |
@@ -100,23 +102,24 @@ git clone https://github.com/aromaappu/BMS.git
 cd BMS
 
 # 2. Add your local DB credentials (git-ignored)
-cp config/credentials.php config/config.local.php
-#    edit config.local.php → set 'user' and 'pass'
+cp config/config.local.example.php config/config.local.php
+#    edit config.local.php → enter your local MySQL 'user' and 'pass'
 
 # 3. Start Apache + MySQL, then open:
 #    http://localhost/BMS/setup.php   ← creates database & tables
 #    http://localhost/BMS/public      ← launch the app
 ```
 
-> `setup.php` only creates what's missing — it is safe to re-run.
+> Run the setup wizard on a local/trusted server. Do not expose the setup page to the internet.
 
 ---
 
 ## 🔒 Security Notes
 
-- Real credentials live in `config/config.local.php`, which is git-ignored — the repo never contains them
-- All queries use prepared statements; passwords/PINs stored as bcrypt hashes
-- Session-based route guards (`requireLogin`) on every protected endpoint
+- Store real database credentials in `config/config.local.php` only; this file is ignored by Git.
+- **Important:** A local credentials file was previously committed to repository history. Removing it from the latest branch does not remove historical exposure. **Change that database password before using this project with real data.**
+- Passwords/PINs use password hashing; authenticated pages are guarded by PHP sessions.
+- This is designed for a trusted XAMPP environment, not an internet-facing production deployment without a separate security review.
 
 ---
 
