@@ -7,51 +7,81 @@ $action = $_GET['action'] ?? 'create';
 
 if ($action === 'create') {
     $data = json_decode(file_get_contents('php://input'), true);
-    $customer_id = (int)($data['customer_id'] ?? 0) ?: 'NULL';
+    if (!is_array($data)) respond(['ok' => false, 'msg' => 'Invalid bill']);
     $items = $data['items'] ?? [];
-    $discount = (float)($data['discount'] ?? 0);
-    $tax = (float)($data['tax'] ?? 0);
-    $mode = $data['payment_mode'] ?? 'cash';
-    $due_date = $data['due_date'] ?? 'NULL';
-    
-    if (empty($items)) respond(['ok' => false, 'msg' => 'No items']);
-    
-    $subtotal = 0;
-    $profit = 0;
-    foreach ($items as $it) {
-        $subtotal += $it['price'] * $it['qty'];
-        $profit += ($it['price'] - $it['purchase_price']) * $it['qty'];
+    if (!is_array($items) || !$items) respond(['ok' => false, 'msg' => 'Add at least one product']);
+
+    $customerId = (int)($data['customer_id'] ?? 0);
+    $customerId = $customerId > 0 ? $customerId : null;
+    $mode = (string)($data['payment_mode'] ?? 'cash');
+    if (!in_array($mode, ['cash', 'upi', 'credit'], true)) respond(['ok' => false, 'msg' => 'Invalid payment method']);
+    if ($mode === 'credit' && !$customerId) respond(['ok' => false, 'msg' => 'Choose a customer for credit bills']);
+
+    $dueDate = $mode === 'credit' ? ($data['due_date'] ?? null) : null;
+    if ($dueDate !== null && $dueDate !== '') {
+        $date = DateTimeImmutable::createFromFormat('!Y-m-d', $dueDate);
+        if (!$date || $date->format('Y-m-d') !== $dueDate) respond(['ok' => false, 'msg' => 'Invalid due date']);
+    } else $dueDate = null;
+
+    $qtyById = [];
+    foreach ($items as $item) {
+        $id = (int)($item['product_id'] ?? 0);
+        $qty = (int)($item['qty'] ?? 0);
+        if ($id < 1 || $qty < 1) respond(['ok' => false, 'msg' => 'Invalid product or quantity']);
+        $qtyById[$id] = ($qtyById[$id] ?? 0) + $qty;
     }
-    $total = $subtotal - $discount + $tax;
-    $bill_no = genBillNo($mysqli);
-    
+
+    $discount = (float)($data['discount'] ?? 0);
+    if (!is_finite($discount) || $discount < 0) respond(['ok' => false, 'msg' => 'Invalid discount']);
+    $gst = getSetting($mysqli, 'gst_enabled', '0') === '1'
+        ? max(0, min(100, (float)getSetting($mysqli, 'default_gst', '0'))) : 0;
+
     $mysqli->begin_transaction();
     try {
-        $dueSql = $mode === 'credit' && $due_date !== 'NULL' ? "'$due_date'" : 'NULL';
-        $custSql = $customer_id ?: 'NULL';
-        $stmt = $mysqli->prepare("INSERT INTO bills (bill_no,customer_id,subtotal,discount,tax,total,payment_mode,profit,due_date) VALUES (?,?,?,?,?,?,?,?, $dueSql)");
-        $stmt->bind_param("sidddds", $bill_no, $customer_id, $subtotal, $discount, $tax, $total, $mode, $profit);
-        // Fix: need to handle NULL customer
-        $sql = "INSERT INTO bills (bill_no,customer_id,subtotal,discount,tax,total,payment_mode,profit,due_date) VALUES ('$bill_no', $custSql, $subtotal, $discount, $tax, $total, '$mode', $profit, $dueSql)";
-        $mysqli->query($sql);
-        $bill_id = $mysqli->insert_id;
-        
-        foreach ($items as $it) {
-            $pid = (int)$it['product_id'];
-            $qty = (int)$it['qty'];
-            $price = (float)$it['price'];
-            $pp = (float)$it['purchase_price'];
-            $stmt = $mysqli->prepare("INSERT INTO bill_items (bill_id,product_id,qty,price,purchase_price) VALUES (?,?,?,?,?)");
-            $stmt->bind_param("iiidd", $bill_id, $pid, $qty, $price, $pp);
-            $stmt->execute();
-            $mysqli->query("UPDATE products SET stock = stock - $qty WHERE id=$pid");
+        $lookup = $mysqli->prepare('SELECT name, selling_price, purchase_price, stock FROM products WHERE id=? FOR UPDATE');
+        $lines = [];
+        $subtotal = 0;
+        $profit = 0;
+
+        foreach ($qtyById as $id => $qty) {
+            $lookup->bind_param('i', $id);
+            $lookup->execute();
+            $product = $lookup->get_result()->fetch_assoc();
+            if (!$product) throw new RuntimeException('One of the products no longer exists');
+            if ($qty > (int)$product['stock']) throw new RuntimeException('Insufficient stock for ' . $product['name']);
+            $price = (float)$product['selling_price'];
+            $purchase = (float)$product['purchase_price'];
+            $lines[] = [$id, $qty, $price, $purchase];
+            $subtotal += $price * $qty;
+            $profit += ($price - $purchase) * $qty;
         }
-        
+
+        if ($discount > $subtotal) throw new RuntimeException('Discount cannot exceed subtotal');
+        $tax = round(($subtotal - $discount) * $gst / 100, 2);
+        $total = round($subtotal - $discount + $tax, 2);
+        $profit = round($profit - $discount, 2);
+        $billNo = genBillNo($mysqli);
+
+        $bill = $mysqli->prepare('INSERT INTO bills
+            (bill_no, customer_id, subtotal, discount, tax, total, payment_mode, profit, due_date)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
+        $bill->bind_param('siddddsds', $billNo, $customerId, $subtotal, $discount, $tax, $total, $mode, $profit, $dueDate);
+        $bill->execute();
+        $billId = $mysqli->insert_id;
+
+        $insertItem = $mysqli->prepare('INSERT INTO bill_items (bill_id, product_id, qty, price, purchase_price) VALUES (?,?,?,?,?)');
+        $reduceStock = $mysqli->prepare('UPDATE products SET stock=stock-? WHERE id=?');
+        foreach ($lines as [$id, $qty, $price, $purchase]) {
+            $insertItem->bind_param('iiidd', $billId, $id, $qty, $price, $purchase);
+            $insertItem->execute();
+            $reduceStock->bind_param('ii', $qty, $id);
+            $reduceStock->execute();
+        }
         $mysqli->commit();
-        respond(['ok' => true, 'bill_no' => $bill_no, 'bill_id' => $bill_id]);
-    } catch (Exception $e) {
+        respond(['ok' => true, 'bill_no' => $billNo, 'bill_id' => $billId]);
+    } catch (Throwable $e) {
         $mysqli->rollback();
-        respond(['ok' => false, 'msg' => $e->getMessage()]);
+        respond(['ok' => false, 'msg' => $e instanceof RuntimeException ? $e->getMessage() : 'Could not save bill. Please retry.']);
     }
 }
 
