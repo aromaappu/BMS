@@ -107,7 +107,7 @@
             callbacks: {
               title: items => (items.length ? String(items[0].label) : ''),
               label: item => (isRing ? item.label + ': ' : '') +
-                (isCurrency ? money(item.parsed?.y ?? item.parsed?.x ?? item.parsed) : Number(item.raw).toLocaleString('en-IN'))
+                (isCurrency ? money(item.raw) : Number(item.raw).toLocaleString('en-IN'))
             }
           }
         },
