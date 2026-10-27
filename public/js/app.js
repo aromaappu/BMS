@@ -66,8 +66,10 @@ function loadPage(page) {
   document.querySelectorAll('.nav-link').forEach(l => l.classList.remove('active'));
   document.querySelector(`[data-page="${page}"]`)?.classList.add('active');
   document.getElementById('pageTitle').textContent = pages[page].title;
+  window.activeBmsPage = page;
+  window.bmsCharts?.clear();
   pages[page].render();
-  if (window.innerWidth < 768) document.getElementById('sidebar').classList.remove('open');
+  if (window.innerWidth < 900) document.getElementById('sidebar').classList.remove('open');
 }
 
 document.querySelectorAll('.nav-link').forEach(link => {
