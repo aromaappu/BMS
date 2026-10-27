@@ -4,61 +4,73 @@ require_once '../includes/functions.php';
 requireLogin();
 
 $type = $_GET['type'] ?? 'daily';
+$allowed = ['daily', 'monthly', 'yearly', 'product', 'category', 'customer', 'payment', 'credit'];
+if (!in_array($type, $allowed, true)) respond(['ok' => false, 'msg' => 'Invalid report type']);
+
 $from = $_GET['from'] ?? date('Y-m-01');
 $to = $_GET['to'] ?? date('Y-m-d');
-$product_id = (int)($_GET['product_id'] ?? 0);
-$category_id = (int)($_GET['category_id'] ?? 0);
+$validDate = function ($date) {
+    if (!is_string($date)) return false;
+    $d = DateTimeImmutable::createFromFormat('!Y-m-d', $date);
+    return $d && $d->format('Y-m-d') === $date;
+};
+if (!$validDate($from) || !$validDate($to) || $from > $to) {
+    respond(['ok' => false, 'msg' => 'Invalid date range']);
+}
 
-$where = "DATE(b.created_at) BETWEEN '$from' AND '$to'";
-if ($product_id) $where .= " AND bi.product_id=$product_id";
-if ($category_id) $where .= " AND p.category_id=$category_id";
+// Validated ISO dates cannot inject SQL. Use a half-open range to keep indexes usable.
+$where = "b.created_at >= '$from 00:00:00' AND b.created_at < DATE_ADD('$to', INTERVAL 1 DAY)";
+$productId = max(0, (int)($_GET['product_id'] ?? 0));
+$categoryId = max(0, (int)($_GET['category_id'] ?? 0));
+if ($productId || $categoryId) {
+    $filter = ['f.bill_id = b.id'];
+    if ($productId) $filter[] = "f.product_id = $productId";
+    if ($categoryId) $filter[] = "fp.category_id = $categoryId";
+    $where .= " AND EXISTS (SELECT 1 FROM bill_items f JOIN products fp ON fp.id=f.product_id WHERE " . implode(' AND ', $filter) . ")";
+}
 
-$data = [];
 $labels = [];
 $values = [];
 $profits = [];
-
 if ($type === 'daily') {
-    $r = $mysqli->query("SELECT DATE(b.created_at) d, SUM(b.total) t, SUM(b.profit) p
-        FROM bills b LEFT JOIN bill_items bi ON bi.bill_id=b.id LEFT JOIN products p ON p.id=bi.product_id
-        WHERE $where GROUP BY d ORDER BY d");
-    while ($row = $r->fetch_assoc()) { $labels[] = $row['d']; $values[] = (float)$row['t']; $profits[] = (float)$row['p']; }
+    // Aggregate bills only once – joining bill_items would multiply revenue/profit.
+    $sql = "SELECT DATE(b.created_at) label, SUM(b.total) amount, SUM(b.profit) profit
+            FROM bills b WHERE $where GROUP BY DATE(b.created_at) ORDER BY label";
 } elseif ($type === 'monthly') {
-    $r = $mysqli->query("SELECT DATE_FORMAT(b.created_at,'%Y-%m') m, SUM(b.total) t, SUM(b.profit) p
-        FROM bills b LEFT JOIN bill_items bi ON bi.bill_id=b.id LEFT JOIN products p ON p.id=bi.product_id
-        WHERE $where GROUP BY m ORDER BY m");
-    while ($row = $r->fetch_assoc()) { $labels[] = $row['m']; $values[] = (float)$row['t']; $profits[] = (float)$row['p']; }
+    $sql = "SELECT DATE_FORMAT(b.created_at,'%Y-%m') label, SUM(b.total) amount, SUM(b.profit) profit
+            FROM bills b WHERE $where GROUP BY DATE_FORMAT(b.created_at,'%Y-%m') ORDER BY label";
 } elseif ($type === 'yearly') {
-    $r = $mysqli->query("SELECT YEAR(b.created_at) y, SUM(b.total) t, SUM(b.profit) p
-        FROM bills b LEFT JOIN bill_items bi ON bi.bill_id=b.id LEFT JOIN products p ON p.id=bi.product_id
-        WHERE $where GROUP BY y ORDER BY y");
-    while ($row = $r->fetch_assoc()) { $labels[] = $row['y']; $values[] = (float)$row['t']; $profits[] = (float)$row['p']; }
+    $sql = "SELECT YEAR(b.created_at) label, SUM(b.total) amount, SUM(b.profit) profit
+            FROM bills b WHERE $where GROUP BY YEAR(b.created_at) ORDER BY label";
 } elseif ($type === 'product') {
-    $r = $mysqli->query("SELECT p.name, SUM(bi.qty) q, SUM(bi.qty*bi.price) t
-        FROM bill_items bi JOIN products p ON p.id=bi.product_id JOIN bills b ON b.id=bi.bill_id
-        WHERE $where GROUP BY bi.product_id ORDER BY t DESC");
-    while ($row = $r->fetch_assoc()) { $labels[] = $row['name']; $values[] = (float)$row['t']; }
+    $sql = "SELECT p.name label, SUM(bi.qty * bi.price) amount
+            FROM bill_items bi JOIN products p ON p.id=bi.product_id
+            JOIN bills b ON b.id=bi.bill_id WHERE $where
+            GROUP BY bi.product_id, p.name ORDER BY amount DESC";
 } elseif ($type === 'category') {
-    $r = $mysqli->query("SELECT c.name, SUM(bi.qty*bi.price) t
-        FROM bill_items bi JOIN products p ON p.id=bi.product_id LEFT JOIN categories c ON c.id=p.category_id
-        JOIN bills b ON b.id=bi.bill_id WHERE $where GROUP BY p.category_id ORDER BY t DESC");
-    while ($row = $r->fetch_assoc()) { $labels[] = $row['name'] ?? 'Uncategorized'; $values[] = (float)$row['t']; }
+    $sql = "SELECT COALESCE(c.name, 'Uncategorized') label, SUM(bi.qty * bi.price) amount
+            FROM bill_items bi JOIN products p ON p.id=bi.product_id
+            LEFT JOIN categories c ON c.id=p.category_id
+            JOIN bills b ON b.id=bi.bill_id WHERE $where
+            GROUP BY p.category_id, c.name ORDER BY amount DESC";
 } elseif ($type === 'customer') {
-    $r = $mysqli->query("SELECT c.name, SUM(b.total) t
-        FROM bills b JOIN customers c ON c.id=b.customer_id
-        LEFT JOIN bill_items bi ON bi.bill_id=b.id LEFT JOIN products p ON p.id=bi.product_id
-        WHERE $where GROUP BY b.customer_id ORDER BY t DESC");
-    while ($row = $r->fetch_assoc()) { $labels[] = $row['name']; $values[] = (float)$row['t']; }
+    $sql = "SELECT COALESCE(c.name, 'Walk-in') label, SUM(b.total) amount
+            FROM bills b LEFT JOIN customers c ON c.id=b.customer_id
+            WHERE $where GROUP BY b.customer_id, c.name ORDER BY amount DESC";
 } elseif ($type === 'payment') {
-    $r = $mysqli->query("SELECT b.payment_mode, SUM(b.total) t
-        FROM bills b LEFT JOIN bill_items bi ON bi.bill_id=b.id LEFT JOIN products p ON p.id=bi.product_id
-        WHERE $where GROUP BY b.payment_mode");
-    while ($row = $r->fetch_assoc()) { $labels[] = strtoupper($row['payment_mode']); $values[] = (float)$row['t']; }
-} elseif ($type === 'credit') {
-    $r = $mysqli->query("SELECT DATE(b.due_date) d, SUM(b.total) t
-        FROM bills b LEFT JOIN bill_items bi ON bi.bill_id=b.id LEFT JOIN products p ON p.id=bi.product_id
-        WHERE b.payment_mode='credit' AND $where GROUP BY d ORDER BY d");
-    while ($row = $r->fetch_assoc()) { $labels[] = $row['d']; $values[] = (float)$row['t']; }
+    $sql = "SELECT UPPER(b.payment_mode) label, SUM(b.total) amount
+            FROM bills b WHERE $where GROUP BY b.payment_mode ORDER BY amount DESC";
+} else {
+    $sql = "SELECT DATE(b.due_date) label, SUM(b.total) amount
+            FROM bills b WHERE b.payment_mode='credit' AND $where
+            GROUP BY DATE(b.due_date) ORDER BY label";
 }
 
+$result = $mysqli->query($sql);
+if (!$result) respond(['ok' => false, 'msg' => 'Unable to generate report']);
+while ($row = $result->fetch_assoc()) {
+    $labels[] = (string)($row['label'] ?? 'Unknown');
+    $values[] = (float)$row['amount'];
+    if (array_key_exists('profit', $row)) $profits[] = (float)$row['profit'];
+}
 respond(['ok' => true, 'labels' => $labels, 'values' => $values, 'profits' => $profits, 'total' => array_sum($values)]);
