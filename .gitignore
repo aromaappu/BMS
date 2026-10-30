@@ -1,1 +1,3 @@
-node_modules/\nconfig/config.local.php\n*.log
+node_modules/
+config/config.local.php
+*.log
